@@ -1,0 +1,197 @@
+# FolderKit++ 자동 빌드 [v51]
+#
+# GitHub이 빌려주는 맥·윈도 컴퓨터에서 실행 파일을 만든다.
+# - 소스를 main에 올리면(push) → 맥 앱(.dmg 2종)과 윈도 exe를 만들고, 셋 다 성공하면
+#   src/styles.py의 APP_VERSION(예: v51.0) 이름으로 "Releases"에 올린다
+#   (같은 버전이면 파일만 새것으로 바뀌고, 버전을 올리면 새 릴리스가 생긴다)
+#   받는 분은 Releases 페이지에서 .dmg 하나만 내려받으면 된다
+# - Actions 탭의 "Run workflow" 버튼으로 손으로 돌릴 수도 있다
+#
+# 만든 앱은 바로 --selftest로 한 번 켜 보고(모든 화면·미니앱 열기), 실패하면 빌드를 실패로 표시한다.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # Releases에 파일을 올리기 위해
+
+env:
+  # 윈도 빌드 서버의 기본 글자판(cp1252)은 한글을 못 찍어 빌드 설정의 안내 문구에서 멈췄다
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  mac:
+    name: mac (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest      # 애플 실리콘(M1 이후) — macos-14는 더 이상 제공되지 않음
+            arch: apple-silicon
+          - runner: macos-15-intel    # 예전 인텔 맥
+            arch: intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 필요한 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+          # 맥 앱 안에서 opencv 5.x가 불러와지지 않아(얼굴 분류 꺼짐) 4.x로 고정
+          pip install "opencv-python-headless>=4.10,<5"
+
+      - name: 버전 읽기
+        id: ver
+        run: echo "v=$(python -c "import re;print(re.search(r'APP_VERSION\s*=\s*\"(v[0-9.]+)\"', open('src/styles.py',encoding='utf-8').read()).group(1))")" >> "$GITHUB_OUTPUT"
+
+      - name: 인증키 넣기(저장소 Secret NEIS_KEY — 공개 소스에는 없음)
+        shell: bash
+        env:
+          NEIS_KEY: ${{ secrets.NEIS_KEY }}
+        run: |
+          if [ -n "$NEIS_KEY" ]; then
+            printf 'NEIS_KEY = "%s"\n' "$NEIS_KEY" > src/_build_secrets.py
+            echo "인증키를 넣었습니다"
+          else
+            echo "NEIS_KEY Secret이 없어 인증키 없이 빌드합니다(급식 등은 각자 키를 넣어 사용)"
+          fi
+
+      - name: 앱 만들기
+        run: pyinstaller --noconfirm FolderKitPP_mac.spec
+
+      - name: 완성된 앱 켜 보기(자가 시험)
+        run: QT_QPA_PLATFORM=offscreen dist/FolderKitPP.app/Contents/MacOS/FolderKitPP --selftest
+
+      - name: dmg로 포장
+        run: |
+          mkdir -p dmg_stage
+          cp -R dist/FolderKitPP.app dmg_stage/
+          ln -s /Applications dmg_stage/Applications
+          cp docs/맥_설치_안내.txt dmg_stage/ || true
+          NAME="FolderKitPP_${{ steps.ver.outputs.v }}_mac_${{ matrix.arch }}.dmg"
+          hdiutil create -volname "FolderKit++" -srcfolder dmg_stage -ov -format UDZO "$NAME"
+          echo "DMG=$NAME" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FolderKitPP_mac_${{ matrix.arch }}
+          path: ${{ env.DMG }}
+
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 필요한 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: 버전 읽기
+        id: ver
+        shell: bash
+        run: echo "v=$(python -c "import re;print(re.search(r'APP_VERSION\s*=\s*\"(v[0-9.]+)\"', open('src/styles.py',encoding='utf-8').read()).group(1))")" >> "$GITHUB_OUTPUT"
+
+      - name: 인증키 넣기(저장소 Secret NEIS_KEY — 공개 소스에는 없음)
+        shell: bash
+        env:
+          NEIS_KEY: ${{ secrets.NEIS_KEY }}
+        run: |
+          if [ -n "$NEIS_KEY" ]; then
+            printf 'NEIS_KEY = "%s"\n' "$NEIS_KEY" > src/_build_secrets.py
+            echo "인증키를 넣었습니다"
+          else
+            echo "NEIS_KEY Secret이 없어 인증키 없이 빌드합니다(급식 등은 각자 키를 넣어 사용)"
+          fi
+
+      - name: exe 만들기
+        run: pyinstaller --noconfirm FolderKitPP.spec
+
+      - name: 완성된 exe 켜 보기(자가 시험)
+        shell: bash
+        run: |
+          QT_QPA_PLATFORM=offscreen FOLDERKIT_SELFTEST_LOG=selftest.log ./dist/FolderKitPP.exe --selftest; code=$?
+          cat selftest.log || echo "(자가 시험 기록 없음)"
+          grep -q "PASS" selftest.log && exit 0 || exit 1
+
+      - name: zip으로 포장
+        shell: pwsh
+        run: |
+          $name = "FolderKitPP_${{ steps.ver.outputs.v }}_windows.zip"
+          Compress-Archive -Path dist/FolderKitPP.exe -DestinationPath $name
+          "ZIP=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FolderKitPP_windows
+          path: ${{ env.ZIP }}
+
+  release:
+    # 맥 2종·윈도가 모두 성공했을 때만, 한 번에 Releases에 올린다(동시에 올리다 겹치지 않게)
+    needs: [mac, windows]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 버전 읽기
+        id: ver
+        run: echo "v=$(python3 -c "import re;print(re.search(r'APP_VERSION\s*=\s*\"(v[0-9.]+)\"', open('src/styles.py',encoding='utf-8').read()).group(1))")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: 옛 릴리스·태그·빌드 파일 정리(커밋 메시지에 [reset-releases]가 있을 때만)
+        if: contains(github.event.head_commit.message, '[reset-releases]')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 릴리스와 그 태그를 모두 지운다(아래에서 이번 버전을 새로 올린다)
+          for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName'); do
+            echo "릴리스 삭제: $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          done
+          # 릴리스 없이 남은 태그도 지운다
+          for tag in $(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name'); do
+            echo "태그 삭제: $tag"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" || true
+          done
+          # 예전 빌드들의 Actions 파일(dmg·zip)도 지운다 — 이번 실행 것만 남긴다
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts" --paginate --jq ".artifacts[] | select(.workflow_run.id != ${{ github.run_id }}) | .id"); do
+            echo "빌드 파일 삭제: $id"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" || true
+          done
+
+      - name: Releases에 올리기
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.v }}
+          target_commitish: ${{ github.sha }}
+          name: FolderKit++ ${{ steps.ver.outputs.v }}
+          body: |
+            ### 내려받기
+            - **맥 (M1·M2·M3·M4)**: `FolderKitPP_${{ steps.ver.outputs.v }}_mac_apple-silicon.dmg`
+            - **맥 (예전 인텔)**: `FolderKitPP_${{ steps.ver.outputs.v }}_mac_intel.dmg`
+            - **윈도**: `FolderKitPP_${{ steps.ver.outputs.v }}_windows.zip`
+
+            맥은 dmg를 열고 FolderKit++를 Applications 폴더로 끌어다 놓으면 됩니다.
+            처음 켤 때 보안 경고가 뜨면 dmg 안의 `맥_설치_안내.txt`를 참고하세요.
+          files: out/*
+          fail_on_unmatched_files: true

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+build/
+dist/
+dmg_stage/
+*.dmg
+*.spec.bak
+.DS_Store
+Thumbs.db
+selftest.log
+
+# [v51.3] 빌드 때 GitHub Secret으로 만들어지는 인증키 파일 — 절대 올리지 않는다
+src/_build_secrets.py
