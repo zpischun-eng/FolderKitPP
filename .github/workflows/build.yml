@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: write   # Releases에 파일을 올리기 위해
+  actions: write    # 정리 단계에서 예전 빌드 기록·파일을 지우기 위해
 
 env:
   # 윈도 빌드 서버의 기본 글자판(cp1252)은 한글을 못 찍어 빌드 설정의 안내 문구에서 멈췄다
@@ -173,10 +174,20 @@ jobs:
             echo "태그 삭제: $tag"
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" || true
           done
-          # 예전 빌드들의 Actions 파일(dmg·zip)도 지운다 — 이번 실행 것만 남긴다
+
+      - name: 예전 빌드 기록·빌드 파일 정리([reset-releases] 또는 [cleanup-actions]일 때만)
+        if: contains(github.event.head_commit.message, '[reset-releases]') || contains(github.event.head_commit.message, '[cleanup-actions]')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 이번 실행을 뺀 예전 빌드 기록(과 거기 딸린 dmg·zip 파일)을 지운다
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs" --paginate --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id"); do
+            echo "빌드 기록 삭제: $id"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/runs/$id" >/dev/null || true
+          done
           for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts" --paginate --jq ".artifacts[] | select(.workflow_run.id != ${{ github.run_id }}) | .id"); do
             echo "빌드 파일 삭제: $id"
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" || true
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null || true
           done
 
       - name: Releases에 올리기
